@@ -1,291 +1,62 @@
 import { useEffect, useRef, useState } from 'react';
+import './style.css';
 
-type Note = {
-  id: string;
-  title: string;
-  body: string;
-  updatedAt: number;
-};
-
+type Note = { id: string; title: string; body: string; updatedAt: number };
 type VaultConfig = { credentialId: string; salt: string };
 type EncryptedVault = { version: 1; iv: string; ciphertext: string };
-type Theme = 'velvet' | 'midnight' | 'paper';
-type NoteFont = 'sans' | 'serif' | 'mono';
-type Preferences = { theme: Theme; font: NoteFont; fontSize: number; animations: boolean; autoLock: number };
+type WrappedKey = { version: 1; salt: string; iv: string; ciphertext: string; iterations?: number };
+type Preferences = { theme: 'velvet' | 'midnight' | 'paper'; font: 'sans' | 'serif' | 'mono'; fontSize: number; animations: boolean; autoLock: number };
 
-const CONFIG_KEY = 'velvet-passkey-v1';
-const VAULT_KEY = 'velvet-encrypted-notes-v1';
-const LEGACY_KEY = 'velvet-notes-v1';
-const PREFERENCES_KEY = 'velvet-preferences-v1';
-const PRF_SALT_BYTES = 32;
-const DEFAULT_PREFERENCES: Preferences = { theme: 'velvet', font: 'sans', fontSize: 16, animations: true, autoLock: 5 };
+const CONFIG_KEY='velvet-passkey-v1', VAULT_KEY='velvet-encrypted-notes-v1', PIN_KEY='velvet-pin-wrap-v1', PIN_HASH_KEY='velvet-pin-settings-v1', LEGACY_KEY='velvet-notes-v1', PREFERENCES_KEY='velvet-preferences-v1';
+const DEFAULT_PREFS: Preferences={theme:'velvet',font:'sans',fontSize:16,animations:true,autoLock:5};
 
-function bytesToBase64Url(bytes: Uint8Array): string {
-  let binary = '';
-  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-function base64UrlToBytes(value: string): Uint8Array {
-  const base64 = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4);
-  return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-}
-function randomBytes(length: number): Uint8Array { return crypto.getRandomValues(new Uint8Array(length)); }
+function b64u(bytes:Uint8Array){let s='';bytes.forEach(b=>s+=String.fromCharCode(b));return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
+function fromB64u(v:string){const s=v.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-v.length%4)%4);return Uint8Array.from(atob(s),c=>c.charCodeAt(0))}
+function random(n:number){return crypto.getRandomValues(new Uint8Array(n))}
+function readConfig():VaultConfig|null{try{const v=JSON.parse(localStorage.getItem(CONFIG_KEY)||'null');return v&&typeof v.credentialId==='string'&&typeof v.salt==='string'?v:null}catch{return null}}
+function readPrefs():Preferences{try{const v=JSON.parse(localStorage.getItem(PREFERENCES_KEY)||'null');if(v)return {...DEFAULT_PREFS,...v}}catch{}return DEFAULT_PREFS}
 
-function readConfig(): VaultConfig | null {
-  try {
-    const value = localStorage.getItem(CONFIG_KEY);
-    if (!value) return null;
-    const config: unknown = JSON.parse(value);
-    if (typeof config === 'object' && config !== null && 'credentialId' in config && 'salt' in config
-      && typeof config.credentialId === 'string' && typeof config.salt === 'string') return config as VaultConfig;
-  } catch { /* Treat corrupt settings as an unconfigured vault. */ }
-  return null;
-}
-function readPreferences(): Preferences {
-  try {
-    const saved: unknown = JSON.parse(localStorage.getItem(PREFERENCES_KEY) ?? 'null');
-    if (typeof saved === 'object' && saved !== null) {
-      const value = saved as Partial<Preferences>;
-      return {
-        theme: value.theme === 'midnight' || value.theme === 'paper' ? value.theme : 'velvet',
-        font: value.font === 'serif' || value.font === 'mono' ? value.font : 'sans',
-        fontSize: typeof value.fontSize === 'number' ? Math.min(24, Math.max(14, value.fontSize)) : 16,
-        animations: value.animations !== false,
-        autoLock: [0, 1, 5, 15].includes(value.autoLock ?? 5) ? value.autoLock ?? 5 : 5,
-      };
-    }
-  } catch { /* Use defaults if preferences are unreadable. */ }
-  return DEFAULT_PREFERENCES;
-}
-function readLegacyNotes(): Note[] {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(LEGACY_KEY) ?? '[]');
-    return Array.isArray(value) ? value as Note[] : [];
-  } catch { return []; }
-}
-function getPrfBytes(credential: Credential): Uint8Array | null {
-  const result = (credential as Credential & { getClientExtensionResults(): { prf?: { results?: { first?: ArrayBuffer } } } }).getClientExtensionResults();
-  const first = result.prf?.results?.first;
-  return first ? new Uint8Array(first) : null;
-}
-async function deriveVaultKey(prfOutput: Uint8Array, salt: Uint8Array): Promise<CryptoKey> {
-  const material = await crypto.subtle.importKey('raw', prfOutput, 'HKDF', false, ['deriveKey']);
-  return crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('Velvet notes encryption v1') },
-    material, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
-  );
-}
-async function encryptNotes(notes: Note[], key: CryptoKey): Promise<EncryptedVault> {
-  const iv = randomBytes(12);
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(notes)));
-  return { version: 1, iv: bytesToBase64Url(iv), ciphertext: bytesToBase64Url(new Uint8Array(ciphertext)) };
-}
-async function decryptNotes(value: string, key: CryptoKey): Promise<Note[]> {
-  const envelope: unknown = JSON.parse(value);
-  if (typeof envelope !== 'object' || envelope === null || !('version' in envelope) || envelope.version !== 1
-    || !('iv' in envelope) || !('ciphertext' in envelope) || typeof envelope.iv !== 'string' || typeof envelope.ciphertext !== 'string') {
-    throw new Error('The encrypted notes file is invalid.');
-  }
-  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64UrlToBytes(envelope.iv) }, key, base64UrlToBytes(envelope.ciphertext));
-  const notes: unknown = JSON.parse(new TextDecoder().decode(plaintext));
-  if (!Array.isArray(notes)) throw new Error('The notes data is invalid.');
-  return notes as Note[];
+async function derivePasskeyKey(prf:Uint8Array,salt:Uint8Array){const m=await crypto.subtle.importKey('raw',prf,'HKDF',false,['deriveKey']);return crypto.subtle.deriveKey({name:'HKDF',hash:'SHA-256',salt,info:new TextEncoder().encode('Velvet master key v2')},m,{name:'AES-GCM',length:256},true,['encrypt','decrypt'])}
+async function derivePinKey(pin:string,salt:Uint8Array,iterations=240000){const m=await crypto.subtle.importKey('raw',new TextEncoder().encode(pin),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations,hash:'SHA-256'},m,{name:'AES-GCM',length:256},true,['encrypt','decrypt'])}
+async function wrapKey(master:Uint8Array,wrapKey:CryptoKey){const iv=random(12);const ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv},wrapKey,master);return {salt:'',iv:b64u(iv),ciphertext:b64u(new Uint8Array(ciphertext))}}
+async function unwrapKey(wrapped:any,wrapKey:CryptoKey){const bytes=await crypto.subtle.decrypt({name:'AES-GCM',iv:fromB64u(wrapped.iv)},wrapKey,fromB64u(wrapped.ciphertext));return new Uint8Array(bytes)}
+async function encryptNotes(notes:Note[],master:Uint8Array){const key=await crypto.subtle.importKey('raw',master,{name:'AES-GCM'},false,['encrypt','decrypt']);const iv=random(12);const ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(JSON.stringify(notes)));return {version:1 as const,iv:b64u(iv),ciphertext:b64u(new Uint8Array(ciphertext))}}
+async function decryptNotes(v:string,master:Uint8Array){const e=JSON.parse(v);const key=await crypto.subtle.importKey('raw',master,{name:'AES-GCM'},false,['decrypt']);const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:fromB64u(e.iv)},key,fromB64u(e.ciphertext));const n=JSON.parse(new TextDecoder().decode(plain));if(!Array.isArray(n))throw new Error('Invalid vault');return n as Note[]}
+
+function App(){
+  const [config,setConfig]=useState<VaultConfig|null>(readConfig);
+  const [unlocked,setUnlocked]=useState(false),[notes,setNotes]=useState<Note[]>([]),[selectedId,setSelectedId]=useState<string|null>(null),[query,setQuery]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState(''),[pinMode,setPinMode]=useState<'unlock'|'setup'|null>(null),[pin,setPin]=useState(''),[confirmPin,setConfirmPin]=useState(''),[master,setMaster]=useState<Uint8Array|null>(null),[prefs,setPrefs]=useState<Preferences>(readPrefs),[settings,setSettings]=useState(false);
+  const saveQueue=useRef(Promise.resolve());
+  const selected=notes.find(n=>n.id===selectedId)||null;
+
+  useEffect(()=>{document.documentElement.dataset.theme=prefs.theme;document.documentElement.dataset.noteFont=prefs.font;document.documentElement.style.setProperty('--note-size',`${prefs.fontSize}px`);document.documentElement.dataset.motion=prefs.animations?'on':'off';localStorage.setItem(PREFERENCES_KEY,JSON.stringify(prefs))},[prefs]);
+  useEffect(()=>{if(!unlocked||prefs.autoLock===0)return;let t=setTimeout(lock,prefs.autoLock*60000);const reset=()=>{clearTimeout(t);t=setTimeout(lock,prefs.autoLock*60000)};const events=['pointerdown','keydown','touchstart'] as const;events.forEach(e=>window.addEventListener(e,reset,{passive:true}));return()=>{clearTimeout(t);events.forEach(e=>window.removeEventListener(e,reset))}},[unlocked,prefs.autoLock]);
+  useEffect(()=>{if(!unlocked||!master)return;saveQueue.current=saveQueue.current.then(async()=>localStorage.setItem(VAULT_KEY,JSON.stringify(await encryptNotes(notes,master)))).catch(()=>setError('Could not save encrypted notes.'))},[notes,unlocked,master]);
+
+  function lock(){setUnlocked(false);setMaster(null);setNotes([]);setSelectedId(null);setQuery('');setPin('');setConfirmPin('');setPinMode(null);setSettings(false)}
+  function prfOutput(c:any){const first=c.getClientExtensionResults?.().prf?.results?.first;return first?new Uint8Array(first):null}
+
+  async function setupPasskey(){if(!window.isSecureContext||!navigator.credentials||!window.PublicKeyCredential){setError('Passkeys require HTTPS and a supported browser.');return}setBusy(true);setError('');try{const c=await navigator.credentials.create({publicKey:{challenge:random(32),rp:{name:'Velvet'},user:{id:random(16),name:'velvet-user',displayName:'Velvet user'},pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],authenticatorSelection:{authenticatorAttachment:'platform',residentKey:'required',userVerification:'required'},timeout:60000,attestation:'none'}});if(!(c instanceof PublicKeyCredential))throw new Error('Setup cancelled');const cfg={credentialId:b64u(new Uint8Array(c.rawId)),salt:b64u(random(32))};const credential=await navigator.credentials.get({publicKey:{challenge:random(32),rpId:location.hostname,allowCredentials:[{type:'public-key',id:fromB64u(cfg.credentialId)}],userVerification:'required',timeout:60000,extensions:{prf:{eval:{first:fromB64u(cfg.salt)}}}} as PublicKeyCredentialRequestOptions});const prf=prfOutput(credential);if(!prf)throw new Error('This browser or device does not support PRF passkeys. You can still use PIN.');const masterBytes=random(32),passkeyKey=await derivePasskeyKey(prf,fromB64u(cfg.salt)),wrappedBase=await wrapKey(masterBytes,passkeyKey),wrapped={...wrappedBase,salt:cfg.salt};localStorage.setItem(PIN_HASH_KEY,JSON.stringify({}));localStorage.setItem(CONFIG_KEY,JSON.stringify(cfg));localStorage.setItem('velvet-master-wrap-v1',JSON.stringify(wrapped));try{const legacy=localStorage.getItem(LEGACY_KEY);const initial=legacy?JSON.parse(legacy):[]}catch{}const initial=readLegacy();localStorage.setItem(VAULT_KEY,JSON.stringify(await encryptNotes(initial,masterBytes)));localStorage.removeItem(LEGACY_KEY);setConfig(cfg);setMaster(masterBytes);setNotes(initial);setUnlocked(true)}catch(e){setError(e instanceof Error?e.message:'Could not set up device unlock')}finally{setBusy(false)}}
+
+  function readLegacy():Note[]{try{const v=JSON.parse(localStorage.getItem(LEGACY_KEY)||'[]');return Array.isArray(v)?v:[]}catch{return[]}}
+
+  async function unlockPasskey(){if(!config)return;setBusy(true);setError('');try{const c=await navigator.credentials.get({publicKey:{challenge:random(32),rpId:location.hostname,allowCredentials:[{type:'public-key',id:fromB64u(config.credentialId)}],userVerification:'required',timeout:60000,extensions:{prf:{eval:{first:fromB64u(config.salt)}}}} as PublicKeyCredentialRequestOptions);const prf=prfOutput(c);if(!prf)throw new Error('Passkey verification did not provide biometric encryption support');const passkeyKey=await derivePasskeyKey(prf,fromB64u(config.salt));const wrapValue=localStorage.getItem('velvet-master-wrap-v1');if(!wrapValue)throw new Error('This passkey has not been migrated to the master-vault format');const m=await unwrapKey(JSON.parse(wrapValue),passkeyKey);const vault=localStorage.getItem(VAULT_KEY);if(!vault)throw new Error('Encrypted vault is missing');setNotes(await decryptNotes(vault,m));setMaster(m);setUnlocked(true)}catch(e){setError(e instanceof Error?e.message:'Could not unlock with Face ID or fingerprint')}finally{setBusy(false)}}
+
+  async function setupPin(){if(!/^\d{4,8}$/.test(pin)){setError('Choose a PIN containing 4 to 8 digits');return}if(pin!==confirmPin){setError('The PINs do not match');return}setBusy(true);setError('');try{const m=master||random(32);const salt=random(16),iterations=240000,key=await derivePinKey(pin,salt,iterations),wrappedBase=await wrapKey(m,key);const wrapped={...wrappedBase,salt:b64u(salt),iterations};localStorage.setItem(PIN_KEY,JSON.stringify(wrapped));localStorage.setItem(PIN_HASH_KEY,JSON.stringify({configured:true}));localStorage.setItem(VAULT_KEY,JSON.stringify(await encryptNotes(notes,m)));setMaster(m);setUnlocked(true);setPinMode(null);setPin('');setConfirmPin('')}catch(e){setError(e instanceof Error?e.message:'Could not save PIN')}finally{setBusy(false)}}
+
+  async function unlockPin(){if(!/^\d{4,8}$/.test(pin)){setError('Enter your 4 to 8 digit PIN');return}setBusy(true);setError('');try{const raw=localStorage.getItem(PIN_KEY);if(!raw)throw new Error('No PIN is configured');const wrapped=JSON.parse(raw),salt=fromB64u(wrapped.salt),key=await derivePinKey(pin,salt,wrapped.iterations||240000),m=await unwrapKey(wrapped,key),vault=localStorage.getItem(VAULT_KEY);if(!vault)throw new Error('Encrypted vault is missing');setNotes(await decryptNotes(vault,m));setMaster(m);setUnlocked(true);setPinMode(null);setPin('');setConfirmPin('')}catch(e){setError('Incorrect PIN or damaged vault')}finally{setBusy(false)}}
+
+  function updateSelected(changes:Partial<Pick<Note,'title'|'body'>>){if(!selected)return;setNotes(v=>v.map(n=>n.id===selected.id?{...n,...changes,updatedAt:Date.now()}:n))}
+  function create(){const n={id:crypto.randomUUID(),title:'',body:'',updatedAt:Date.now()};setNotes(v=>[n,...v]);setSelectedId(n.id)}
+  function remove(){if(!selected)return;setNotes(v=>v.filter(n=>n.id!==selected.id));setSelectedId(null)}
+  const filtered=notes.filter(n=>`${n.title} ${n.body}`.toLowerCase().includes(query.toLowerCase())).sort((a,b)=>b.updatedAt-a.updatedAt);
+  const pinConfigured=!!localStorage.getItem(PIN_KEY);
+
+  if(!unlocked)return <main className="auth-screen"><section className="auth-card"><a className="brand auth-brand" href="/"><span className="brand-mark">v</span> velvet</a><div className="auth-icon">⌑</div><p className="eyebrow">YOUR PRIVATE NOTEBOOK</p><h1>Your thoughts, protected.</h1><p className="auth-copy">Unlock with your phone's Face ID or fingerprint, or use your Velvet PIN.</p><button className="primary-button auth-button" onClick={unlockPasskey} disabled={busy||!config}><span>⌑</span>{busy?'Waiting for your device…':config?'Unlock with Face ID / fingerprint':'Face ID / fingerprint unavailable'}</button><button className="secondary-button auth-button pin-button" onClick={()=>setPinMode(pinConfigured?'unlock':'setup')}>{pinConfigured?'Unlock with PIN':'Set up PIN'}</button>{pinMode&&<div className="pin-panel"><label>{pinMode==='setup'?'Create a 4–8 digit PIN':'Enter your PIN'}<input className="pin-input" type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8} value={pin} onChange={e=>setPin(e.target.value.replace(/\D/g,''))} autoComplete="one-time-code" autoFocus /></label>{pinMode==='setup'&&<label>Confirm PIN<input className="pin-input" type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8} value={confirmPin} onChange={e=>setConfirmPin(e.target.value.replace(/\D/g,''))} /></label>}<button className="primary-button auth-button" onClick={pinMode==='setup'?setupPin:unlockPin} disabled={busy}>{pinMode==='setup'?'Save PIN':'Unlock PIN'}</button></div>}<button className="auth-settings" onClick={()=>setSettings(true)}>Appearance settings</button>{error&&<p className="error-message">{error}</p>}{settings&&<Settings prefs={prefs} setPrefs={setPrefs} close={()=>setSettings(false)}/>}<p className="privacy-copy">Biometrics stay on your device. PINs are hardened with PBKDF2 and never stored as plain text.</p></section></main>;
+
+  return <main className="app-shell"><aside className="sidebar"><a className="brand" href="/"><span className="brand-mark">v</span> velvet</a><p className="eyebrow">YOUR SPACE</p><div className="notes-heading"><span>Notes</span><span className="count">{notes.length}</span></div><label className="search-box"><span>⌕</span><input placeholder="Search notes" value={query} onChange={e=>setQuery(e.target.value)} /></label><button className="new-note" onClick={create}>＋ New note</button><nav className="note-list">{filtered.map(n=><button key={n.id} className={`note-item ${n.id===selectedId?'active':''}`} onClick={()=>setSelectedId(n.id)}><span className="note-item-title">{n.title.trim()||'Untitled note'}</span><span className="note-item-preview">{n.body.trim().slice(0,52)||'No additional text'}</span></button>)}{!filtered.length&&<p className="empty-list">No notes yet.</p>}</nav><p className="storage-note"><span className="status-dot"/> Encrypted on this device</p></aside><section className="workspace"><header className="topbar"><div><span className="topbar-label">PRIVATE NOTEBOOK</span><span className="topbar-subtitle">A little space for what matters</span></div><div className="topbar-actions"><button className="settings-button" onClick={()=>setSettings(true)}>⚙ Settings</button><button className="lock-button" onClick={lock}>⌑ Lock</button></div></header>{selected?<article className="editor" key={selected.id}><div className="editor-actions"><span className="saved-label"><span className="status-dot"/> Edited {new Date(selected.updatedAt).toLocaleString()}</span><button className="delete-button" onClick={remove}>Delete</button></div><input className="title-input" placeholder="Untitled note" value={selected.title} onChange={e=>updateSelected({title:e.target.value})} autoFocus/><textarea className="body-input" placeholder="Start writing..." value={selected.body} onChange={e=>updateSelected({body:e.target.value})}/></article>:<div className="welcome"><div className="welcome-icon">✳</div><p className="eyebrow">A MOMENT FOR YOURSELF</p><h1>Make room<br/>for your thoughts.</h1><p className="welcome-copy">A quiet place for ideas, reminders, and everything in between.</p><button className="primary-button" onClick={create}>Create your first note <span>→</span></button></div>}</section>{settings&&<Settings prefs={prefs} setPrefs={setPrefs} close={()=>setSettings(false)} lock={lock}/>}</main>
 }
 
-function App() {
-  const [config, setConfig] = useState<VaultConfig | null>(readConfig);
-  const [vaultKey, setVaultKey] = useState<CryptoKey | null>(null);
-  const [unlocked, setUnlocked] = useState(false);
-  const [notes, setNotes] = useState<Note[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [preferences, setPreferences] = useState<Preferences>(readPreferences);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const saveQueue = useRef<Promise<void>>(Promise.resolve());
-  const selected = notes.find((note) => note.id === selectedId) ?? null;
+function Settings({prefs,setPrefs,close,lock}:{prefs:Preferences,setPrefs:(p:Preferences)=>void,close:()=>void,lock?:()=>void}){useEffect(()=>{const k=(e:KeyboardEvent)=>e.key==='Escape'&&close();window.addEventListener('keydown',k);return()=>window.removeEventListener('keydown',k)},[close]);return <div className="settings-backdrop" onMouseDown={e=>e.target===e.currentTarget&&close()}><section className="settings-panel" role="dialog"><header className="settings-header"><div><p className="eyebrow">MAKE IT YOURS</p><h2>Settings</h2></div><button className="icon-button" onClick={close}>×</button></header><div className="settings-content"><section className="setting-section"><h3>Appearance</h3><div className="theme-options">{(['velvet','midnight','paper'] as const).map(t=><button key={t} className={`theme-option ${prefs.theme===t?'selected':''}`} onClick={()=>setPrefs({...prefs,theme:t})}><span className={`theme-swatch theme-swatch-${t}`}/><span>{t[0].toUpperCase()+t.slice(1)}</span></button>)}</div></section><section className="setting-section"><h3>Writing</h3><label className="setting-row"><span><strong>Note font</strong><small>Choose a writing style</small></span><select value={prefs.font} onChange={e=>setPrefs({...prefs,font:e.target.value as Preferences['font']})}><option value="sans">Modern sans</option><option value="serif">Classic serif</option><option value="mono">Monospace</option></select></label><label className="setting-row"><span><strong>Text size</strong><small>Adjust editor text</small></span><select value={prefs.fontSize} onChange={e=>setPrefs({...prefs,fontSize:Number(e.target.value)})}><option value="14">Small</option><option value="16">Comfortable</option><option value="18">Large</option><option value="21">Extra large</option><option value="24">Largest</option></select></label></section><section className="setting-section"><h3>Behavior</h3><label className="setting-row"><span><strong>Animations</strong><small>Subtle interface motion</small></span><input className="toggle" type="checkbox" checked={prefs.animations} onChange={e=>setPrefs({...prefs,animations:e.target.checked})}/></label><label className="setting-row"><span><strong>Auto-lock</strong><small>Lock after inactivity</small></span><select value={prefs.autoLock} onChange={e=>setPrefs({...prefs,autoLock:Number(e.target.value)})}><option value="1">1 minute</option><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="0">Never</option></select></label></section><section className="setting-section security-section"><h3>Security</h3><p className="security-note">Face ID/fingerprint and PIN protect the same encrypted vault. Keep access to either security method. PIN fallback does not replace device biometrics and both methods cannot recover data if all credentials are lost.</p>{lock&&<button className="secondary-button lock-now" onClick={lock}>Lock vault now</button>}</section></div><footer className="settings-footer"><span>Preferences save on this device.</span><button className="primary-button settings-done" onClick={close}>Done</button></footer></section></div>}
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = preferences.theme;
-    document.documentElement.dataset.noteFont = preferences.font;
-    document.documentElement.style.setProperty('--note-size', `${preferences.fontSize}px`);
-    document.documentElement.dataset.motion = preferences.animations ? 'on' : 'off';
-    localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
-  }, [preferences]);
-
-  useEffect(() => {
-    if (!unlocked || preferences.autoLock === 0) return undefined;
-    let timer = window.setTimeout(lockVault, preferences.autoLock * 60_000);
-    const resetTimer = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(lockVault, preferences.autoLock * 60_000);
-    };
-    const events: (keyof WindowEventMap)[] = ['pointerdown', 'keydown', 'touchstart'];
-    events.forEach((event) => window.addEventListener(event, resetTimer, { passive: true }));
-    return () => {
-      window.clearTimeout(timer);
-      events.forEach((event) => window.removeEventListener(event, resetTimer));
-    };
-  }, [unlocked, preferences.autoLock]);
-
-  useEffect(() => {
-    if (!unlocked || !vaultKey) return;
-    saveQueue.current = saveQueue.current.then(async () => {
-      const encrypted = await encryptNotes(notes, vaultKey);
-      localStorage.setItem(VAULT_KEY, JSON.stringify(encrypted));
-    }).catch(() => setError('Could not save your encrypted notes. Check available device storage.'));
-  }, [notes, unlocked, vaultKey]);
-
-  function updatePreferences(changes: Partial<Preferences>) {
-    setPreferences((current) => ({ ...current, ...changes }));
-  }
-  function lockVault() {
-    setUnlocked(false); setVaultKey(null); setNotes([]); setSelectedId(null); setQuery(''); setError(''); setSettingsOpen(false);
-  }
-  async function setupPasskey() {
-    if (!window.isSecureContext || !navigator.credentials || !window.PublicKeyCredential) {
-      setError('Passkeys need a supported browser on HTTPS (or localhost).'); return;
-    }
-    setBusy(true); setError('');
-    try {
-      const credential = await navigator.credentials.create({ publicKey: {
-        challenge: randomBytes(32), rp: { name: 'Velvet' }, user: { id: randomBytes(16), name: 'velvet-local-user', displayName: 'Velvet user' },
-        pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-        authenticatorSelection: { authenticatorAttachment: 'platform', residentKey: 'required', userVerification: 'required' }, timeout: 60000, attestation: 'none',
-      } });
-      if (!(credential instanceof PublicKeyCredential)) throw new Error('Passkey setup was cancelled.');
-      const newConfig = { credentialId: bytesToBase64Url(new Uint8Array(credential.rawId)), salt: bytesToBase64Url(randomBytes(PRF_SALT_BYTES)) };
-      const key = await deriveVaultKey(await requestPrf(newConfig), base64UrlToBytes(newConfig.salt));
-      const migratedNotes = readLegacyNotes();
-      localStorage.setItem(VAULT_KEY, JSON.stringify(await encryptNotes(migratedNotes, key)));
-      localStorage.setItem(CONFIG_KEY, JSON.stringify(newConfig)); localStorage.removeItem(LEGACY_KEY);
-      setConfig(newConfig); setNotes(migratedNotes); setVaultKey(key); setUnlocked(true);
-    } catch (cause) { setError(errorMessage(cause, 'Could not set up fingerprint or Face ID.')); }
-    finally { setBusy(false); }
-  }
-  async function requestPrf(vaultConfig: VaultConfig): Promise<Uint8Array> {
-    const credential = await navigator.credentials.get({ publicKey: {
-      challenge: randomBytes(32), rpId: location.hostname,
-      allowCredentials: [{ type: 'public-key', id: base64UrlToBytes(vaultConfig.credentialId) }], userVerification: 'required', timeout: 60000,
-      extensions: { prf: { eval: { first: base64UrlToBytes(vaultConfig.salt) } } },
-    } as PublicKeyCredentialRequestOptions });
-    if (!(credential instanceof PublicKeyCredential)) throw new Error('Passkey verification was cancelled.');
-    const output = getPrfBytes(credential);
-    if (!output) throw new Error('This authenticator or browser does not support WebAuthn PRF, which is required to encrypt notes.');
-    return output;
-  }
-  async function unlockVault() {
-    if (!config) return;
-    setBusy(true); setError('');
-    try {
-      const key = await deriveVaultKey(await requestPrf(config), base64UrlToBytes(config.salt));
-      const encrypted = localStorage.getItem(VAULT_KEY);
-      if (!encrypted) throw new Error('Encrypted notes are missing from this browser.');
-      setNotes(await decryptNotes(encrypted, key)); setVaultKey(key); setUnlocked(true);
-    } catch (cause) { setError(errorMessage(cause, 'Could not unlock your notes.')); }
-    finally { setBusy(false); }
-  }
-  function updateSelected(changes: Partial<Pick<Note, 'title' | 'body'>>) {
-    if (!selected) return;
-    setNotes((current) => current.map((note) => note.id === selected.id ? { ...note, ...changes, updatedAt: Date.now() } : note));
-  }
-  function createNote() {
-    const note: Note = { id: crypto.randomUUID(), title: '', body: '', updatedAt: Date.now() };
-    setNotes((current) => [note, ...current]); setSelectedId(note.id);
-  }
-  function deleteSelected() {
-    if (!selected) return;
-    setNotes((current) => current.filter((note) => note.id !== selected.id)); setSelectedId(null);
-  }
-  const filteredNotes = notes.filter((note) => `${note.title} ${note.body}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => b.updatedAt - a.updatedAt);
-
-  if (!unlocked) {
-    const supported = window.isSecureContext && Boolean(navigator.credentials) && Boolean(window.PublicKeyCredential);
-    return <main className="auth-screen"><section className="auth-card">
-      <a className="brand auth-brand" href="/" aria-label="Velvet home"><span className="brand-mark">v</span> velvet</a>
-      <div className="auth-icon" aria-hidden="true">⌑</div><p className="eyebrow">YOUR PRIVATE NOTEBOOK</p>
-      <h1>{config ? 'Your thoughts, protected.' : 'A private place, just for you.'}</h1>
-      <p className="auth-copy">{config ? 'Unlock this vault with the fingerprint, Face ID, or device screen lock you set up.' : 'Set up a device passkey to protect and encrypt your notes. Your biometric data stays with your device.'}</p>
-      {supported ? <button className="primary-button auth-button" onClick={config ? unlockVault : setupPasskey} disabled={busy}><span aria-hidden="true">{busy ? '◌' : '⌑'}</span>{busy ? 'Waiting for your device…' : config ? 'Unlock with passkey' : 'Set up fingerprint or Face ID'}</button> : <p className="auth-warning">Passkeys require HTTPS (or localhost) and a supported browser/device.</p>}
-      {error && <p className="error-message" role="alert">{error}</p>}
-      <p className="privacy-copy">Notes are encrypted on this device. Velvet never receives your passkey or notes.</p>
-      {config && <p className="privacy-copy recovery-copy">Keep this browser profile and device passkey available. There is no password reset or recovery key.</p>}
-      <button className="auth-settings" onClick={() => setSettingsOpen(true)}>Appearance settings</button>
-      {settingsOpen && <Settings preferences={preferences} onChange={updatePreferences} onClose={() => setSettingsOpen(false)} locked />}
-    </section></main>;
-  }
-
-  return <main className="app-shell">
-    <aside className="sidebar">
-      <a className="brand" href="/" aria-label="Velvet home"><span className="brand-mark">v</span> velvet</a>
-      <p className="eyebrow">YOUR SPACE</p>
-      <div className="notes-heading"><span>Notes</span><span className="count">{notes.length}</span></div>
-      <label className="search-box"><span aria-hidden="true">⌕</span><input aria-label="Search notes" placeholder="Search notes" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-      <button className="new-note" onClick={createNote}><span>＋</span> New note</button>
-      <nav className="note-list" aria-label="Your notes">
-        {filteredNotes.map((note) => <button key={note.id} className={`note-item ${note.id === selectedId ? 'active' : ''}`} onClick={() => setSelectedId(note.id)}>
-          <span className="note-item-title">{note.title.trim() || 'Untitled note'}</span><span className="note-item-preview">{note.body.trim().slice(0, 52) || 'No additional text'}</span>
-        </button>)}
-        {filteredNotes.length === 0 && <p className="empty-list">{query ? 'No matching notes.' : 'Your notes will appear here.'}</p>}
-      </nav>
-      <p className="storage-note"><span className="status-dot" /> Encrypted on this device</p>
-    </aside>
-    <section className="workspace">
-      <header className="topbar"><div><span className="topbar-label">PRIVATE NOTEBOOK</span><span className="topbar-subtitle">A little space for what matters</span></div><div className="topbar-actions"><button className="settings-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings"><span aria-hidden="true">⚙</span><span>Settings</span></button><button className="lock-button" onClick={lockVault}><span aria-hidden="true">⌑</span> Lock vault</button></div></header>
-      {selected ? <article className="editor" key={selected.id}>
-        <div className="editor-actions"><span className="saved-label"><span className="status-dot" /> Edited {new Date(selected.updatedAt).toLocaleString()}</span><button className="delete-button" onClick={deleteSelected} aria-label="Delete note">Delete note</button></div>
-        <input className="title-input" aria-label="Note title" placeholder="Untitled note" value={selected.title} onChange={(event) => updateSelected({ title: event.target.value })} autoFocus />
-        <textarea className="body-input" aria-label="Note content" placeholder="Start writing..." value={selected.body} onChange={(event) => updateSelected({ body: event.target.value })} />
-      </article> : <div className="welcome">
-        <div className="welcome-icon">✳</div><p className="eyebrow">A MOMENT FOR YOURSELF</p><h1>Make room<br />for your thoughts.</h1>
-        <p className="welcome-copy">A quiet place to collect ideas, reminders, and everything in between.</p><button className="primary-button" onClick={createNote}>Create your first note <span>→</span></button>
-        <p className="privacy-copy">Notes are encrypted and saved in this browser.</p>
-      </div>}
-    </section>
-    {settingsOpen && <Settings preferences={preferences} onChange={updatePreferences} onClose={() => setSettingsOpen(false)} onLock={lockVault} />}
-  </main>;
-}
-
-function Settings({ preferences, onChange, onClose, onLock, locked = false }: {
-  preferences: Preferences; onChange: (changes: Partial<Preferences>) => void; onClose: () => void; onLock?: () => void; locked?: boolean;
-}) {
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose]);
-  return <div className="settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-      <header className="settings-header"><div><p className="eyebrow">MAKE IT YOURS</p><h2 id="settings-title">Settings</h2></div><button className="icon-button" onClick={onClose} aria-label="Close settings">×</button></header>
-      <div className="settings-content">
-        <section className="setting-section"><h3>Appearance</h3><p className="setting-description">Choose a look that feels like you.</p>
-          <div className="theme-options" role="group" aria-label="Color theme">
-            {([['velvet', 'Velvet', 'theme-swatch-velvet'], ['midnight', 'Midnight', 'theme-swatch-midnight'], ['paper', 'Paper', 'theme-swatch-paper']] as const).map(([theme, label, swatch]) =>
-              <button key={theme} className={`theme-option ${preferences.theme === theme ? 'selected' : ''}`} onClick={() => onChange({ theme })} aria-pressed={preferences.theme === theme}><span className={`theme-swatch ${swatch}`} /><span>{label}</span></button>)}
-          </div>
-        </section>
-        <section className="setting-section"><h3>Writing</h3>
-          <label className="setting-row"><span><strong>Note font</strong><small>Pick a style for your writing</small></span><select value={preferences.font} onChange={(event) => onChange({ font: event.target.value as NoteFont })}><option value="sans">Modern sans</option><option value="serif">Classic serif</option><option value="mono">Monospace</option></select></label>
-          <label className="setting-row"><span><strong>Text size</strong><small>Adjust editor text size</small></span><select value={preferences.fontSize} onChange={(event) => onChange({ fontSize: Number(event.target.value) })}><option value="14">Small</option><option value="16">Comfortable</option><option value="18">Large</option><option value="21">Extra large</option><option value="24">Largest</option></select></label>
-        </section>
-        <section className="setting-section"><h3>Behavior</h3>
-          <label className="setting-row"><span><strong>Animations</strong><small>Subtle motion in the interface</small></span><input className="toggle" type="checkbox" checked={preferences.animations} onChange={(event) => onChange({ animations: event.target.checked })} /></label>
-          <label className="setting-row"><span><strong>Auto-lock</strong><small>Lock after you stop using Velvet</small></span><select value={preferences.autoLock} onChange={(event) => onChange({ autoLock: Number(event.target.value) })}><option value="1">1 minute</option><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="0">Never</option></select></label>
-        </section>
-        <section className="setting-section security-section"><h3>Security</h3><div className="security-status"><span className="status-dot" /><span><strong>Device passkey active</strong><small>Fingerprint, Face ID, or screen lock</small></span></div>
-          <p className="security-note">Your passkey protects the encryption key. A separate password cannot be changed here; adding one needs a safe vault-key migration. Keep access to your device passkey—there is no recovery key.</p>
-          {!locked && onLock && <button className="secondary-button lock-now" onClick={onLock}>Lock vault now</button>}
-        </section>
-      </div>
-      <footer className="settings-footer"><span>Preferences are saved on this device.</span><button className="primary-button settings-done" onClick={onClose}>Done</button></footer>
-    </section>
-  </div>;
-}
-
-function errorMessage(cause: unknown, fallback: string): string {
-  if (cause instanceof DOMException && cause.name === 'NotAllowedError') return 'The passkey prompt was cancelled or timed out. Try again.';
-  if (cause instanceof Error) return cause.message;
-  return fallback;
-}
 export default App;
