@@ -2,12 +2,25 @@
 
 Private, local-first notes with passkey and PIN protection.
 
-- **Face ID / fingerprint:** uses a platform WebAuthn passkey on supported HTTPS browsers.
-- **PIN:** available to phones or browsers without supported biometrics. PINs are used to derive a key with PBKDF2 and are never stored as plain text.
-- **Encryption:** notes are encrypted with AES-GCM using a random vault master key.
-- **Settings:** themes, fonts, text size, animation, auto-lock, and security controls.
+## Unlock options
 
-Run locally:
+- Face ID or fingerprint through a supported platform WebAuthn passkey
+- A local 4–8 digit PIN fallback
+- AES-GCM encrypted notes
+- PBKDF2-derived PIN wrapping
+- Automatic vault locking
+
+## Writing experience
+
+- Responsive desktop and mobile layout
+- Velvet, Midnight, and Paper themes
+- Sans, serif, and monospace writing styles
+- Adjustable text size
+- Searchable note list
+- Reduced-motion support
+- Touch-friendly controls and mobile settings sheet
+
+## Run locally
 
 ```sh
 npm install
@@ -15,4 +28,4 @@ npm run dev
 npm run build
 ```
 
-Passkeys require HTTPS (localhost is secure for development). PIN fallback works as a separate key recovery method, but both security methods rely on data stored in this browser. If the browser/profile or all unlock methods are lost, encrypted notes cannot be recovered.
+Passkeys require HTTPS (localhost is secure for development). Keep access to your browser passkey and PIN. If browser data or every unlock method is lost, encrypted notes cannot be recovered.

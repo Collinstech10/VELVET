@@ -1,0 +1,236 @@
+/* Velvet polish: tactile controls, clearer focus, and calmer motion. */
+
+:root {
+  --velvet-ease: cubic-bezier(.22, 1, .36, 1);
+}
+
+button, input, textarea, select, .theme-option, .note-item {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  transition: transform 180ms var(--velvet-ease),
+              background-color 180ms ease,
+              border-color 180ms ease,
+              color 180ms ease,
+              box-shadow 180ms ease,
+              opacity 180ms ease;
+}
+
+button:active:not(:disabled) {
+  transform: scale(.975);
+}
+
+.sidebar {
+  box-shadow: 12px 0 40px rgba(0, 0, 0, .08);
+}
+
+.brand {
+  transition: opacity 180ms ease, transform 180ms var(--velvet-ease);
+}
+
+.brand:hover {
+  opacity: .88;
+  transform: translateX(2px);
+}
+
+.brand-mark {
+  transition: transform 250ms var(--velvet-ease), box-shadow 250ms ease;
+}
+
+.brand:hover .brand-mark {
+  transform: rotate(-5deg) scale(1.04);
+}
+
+.search-box {
+  transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.search-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.new-note,
+.primary-button,
+.secondary-button,
+.settings-button,
+.lock-button,
+.delete-button,
+.icon-button {
+  min-height: 44px;
+}
+
+.note-item {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.note-item::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(90deg, var(--accent-soft), transparent);
+  opacity: 0;
+  transform: translateX(-8px);
+  transition: opacity 180ms ease, transform 250ms var(--velvet-ease);
+}
+
+.note-item:hover::before,
+.note-item.active::before {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.note-item.active {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.note-item-preview,
+.empty-list,
+.saved-label,
+.setting-description,
+.setting-row small,
+.security-note,
+.privacy-copy {
+  line-height: 1.55;
+}
+
+.editor {
+  animation: velvet-editor-enter 420ms var(--velvet-ease) both;
+}
+
+.title-input {
+  transition: border-color 180ms ease;
+}
+
+.body-input {
+  caret-color: var(--accent);
+}
+
+.body-input::selection,
+.title-input::selection {
+  background: var(--accent-soft);
+}
+
+.auth-card {
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .24);
+  animation: velvet-card-enter 500ms var(--velvet-ease) both;
+}
+
+.auth-icon,
+.welcome-icon {
+  transition: transform 300ms var(--velvet-ease), box-shadow 300ms ease;
+}
+
+.auth-card:hover .auth-icon,
+.welcome:hover .welcome-icon {
+  transform: translateY(-3px) rotate(3deg);
+  box-shadow: 0 12px 35px var(--accent-soft);
+}
+
+.primary-button:hover:not(:disabled) {
+  box-shadow: 0 12px 32px var(--accent-soft);
+}
+
+.settings-panel {
+  box-shadow: 0 30px 100px rgba(0, 0, 0, .38);
+}
+
+.theme-option {
+  transform: translateZ(0);
+}
+
+.theme-option:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.setting-row select,
+.pin-input {
+  transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.setting-row select:focus,
+.pin-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.toggle {
+  position: relative;
+  transition: background 180ms ease, border-color 180ms ease;
+}
+
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 220ms var(--velvet-ease), background 180ms ease;
+}
+
+.toggle:checked::after {
+  transform: translateX(17px);
+  background: white;
+}
+
+.note-list,
+.settings-content,
+.auth-card {
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-soft) transparent;
+}
+
+.note-list::-webkit-scrollbar,
+.settings-content::-webkit-scrollbar,
+.auth-card::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.note-list::-webkit-scrollbar-thumb,
+.settings-content::-webkit-scrollbar-thumb,
+.auth-card::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--accent-soft);
+}
+
+.status-dot {
+  box-shadow: 0 0 10px color-mix(in srgb, var(--good) 45%, transparent);
+}
+
+.error-message {
+  border: 1px solid color-mix(in srgb, #d27685 30%, transparent);
+}
+
+@keyframes velvet-editor-enter {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes velvet-card-enter {
+  from { opacity: 0; transform: translateY(14px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (hover: none) {
+  .note-item:hover,
+  .theme-option:hover,
+  .primary-button:hover:not(:disabled) {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+  }
+}
